@@ -2,296 +2,342 @@
 """Render Dan Pyne gig graphics (feed 1080x1350, story 1080x1920) from a JSON spec.
 
 Usage: python3 render.py spec.json out.png
+
 Spec keys:
   kind:   solo | story | weekly | monthly
-  style:  solo: amber | navy | bold | cream
-          story: amber | navy
-          weekly: anton | split
-          monthly: darklist | creamlist
-  photo:  file name in photos/ ; focus: CSS object-position (e.g. "50% 30%")
-  gigs:   [{"date":"2026-11-14","venue":"The Wine Mill","city":"Peninsula, OH","time":"6-9 PM","address":"..."}]
-  month:  "November" (monthly)
+  style:  solo:    spotlight | goldframe | neon | editorial
+          story:   spotlight | navy
+          weekly:  bigtype | sunset
+          monthly: marquee | editorial
+  photo:  photo stem (e.g. "riverfront-portrait-1"). Uses cutouts/<stem>.png (Dan cut out of the
+          background, bottom faded) and photos/<stem>.jpg (for blurred backdrops).
+          If a cutout is missing, make one:  python3 render.py --cutout <stem>
+  cut:    optional overrides for the cutout: {"h": px height, "x": center x px, "bottom": px from bottom}
+  gigs:   [{"date":"2026-11-14","venue":"The Wine Mill","city":"Peninsula, OH","time":"6-9 PM",
+            "address":"4964 Akron-Cleveland Rd, Peninsula"}]
+  month:  "November" (monthly only; defaults to the first gig's month)
+
+Photo notes: riverfront-portrait-1/2 are clean head-to-hip cutouts (best for goldframe, editorial,
+story, weekly, monthly). hob-stage-bw is a live shot with guitar and mic, faded at the bottom
+(best for spotlight, neon, story spotlight, weekly bigtype).
 """
 import json, sys, html, datetime, pathlib
-from playwright.sync_api import sync_playwright
 
 ROOT = pathlib.Path(__file__).resolve().parent
-FONTS = ROOT / "fonts"
-PHOTOS = ROOT / "photos"
-WEB = "DANPYNE.COM"
-HANDLE = "@DANPYNEMUSIC"
-TAG = "Acoustic Top 40 Hits"
+FONTS, PHOTOS, CUTS = ROOT / "fonts", ROOT / "photos", ROOT / "cutouts"
+WEB, HANDLE, TAG = "DANPYNE.COM", "@DANPYNEMUSIC", "Acoustic Top 40 Hits"
 
 def e(s): return html.escape(str(s))
-
 def d(g): return datetime.date.fromisoformat(g["date"])
 
 ICON = {
- "clock": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
+ "clock": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>',
  "pin": '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>',
- "cal": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
+ "cal": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
  "ig": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor"/></svg>',
  "fb": '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 8h3V4h-3a4 4 0 0 0-4 4v2H8v4h2v8h4v-8h3l1-4h-4V8z"/></svg>',
 }
 def ic(n, cls="ic"): return f'<span class="{cls}">{ICON[n]}</span>'
 
 def fontface():
-    f = lambda fam, file, w="100 900": f"@font-face{{font-family:'{fam}';src:url('file://{FONTS/file}');font-weight:{w};}}"
+    f = lambda fam, file: f"@font-face{{font-family:'{fam}';src:url('file://{FONTS/file}');font-weight:100 900;}}"
     return "".join([f("Bebas","BebasNeue-Regular.ttf"), f("Oswald","Oswald-VF.ttf"), f("Playfair","PlayfairDisplay-VF.ttf"),
         f("Vibes","GreatVibes-Regular.ttf"), f("Mont","Montserrat-VF.ttf"), f("Anton","Anton-Regular.ttf"),
         f("Kaushan","KaushanScript-Regular.ttf"), f("Corm","CormorantGaramond-VF.ttf")])
 
-def bokeh(n=26, seed=7, colors=("255,190,90","255,160,60","255,215,140"), area=(0,100,0,100), size=(30,120)):
+GRAIN = ("url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'>"
+         "<filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/>"
+         "<feColorMatrix values='0 0 0 0 .5  0 0 0 0 .5  0 0 0 0 .5  0 0 0 .55 0'/></filter>"
+         "<rect width='300' height='300' filter='url(%23n)'/></svg>\")")
+
+def bokeh(n, seed, colors, area, size=(30, 120), op=(.18, .55)):
     import random
     r = random.Random(seed); out = []
     for _ in range(n):
-        s = r.randint(*size); c = r.choice(colors); o = r.uniform(.18,.55)
-        x = r.uniform(area[0],area[1]); y = r.uniform(area[2],area[3])
-        out.append(f'<i style="position:absolute;left:{x}%;top:{y}%;width:{s}px;height:{s}px;border-radius:50%;'
-                   f'background:radial-gradient(circle,rgba({c},{o}) 0%,rgba({c},{o*.6}) 55%,rgba({c},0) 72%);'
-                   f'filter:blur({r.uniform(0,2.5):.1f}px)"></i>')
-    return '<div class="bokeh">' + "".join(out) + "</div>"
+        s = r.randint(*size); c = r.choice(colors); o = r.uniform(*op)
+        out.append(f'<i style="position:absolute;left:{r.uniform(area[0],area[1]):.1f}%;top:{r.uniform(area[2],area[3]):.1f}%;'
+                   f'width:{s}px;height:{s}px;border-radius:50%;background:radial-gradient(circle,rgba({c},{o:.2f}) 0%,'
+                   f'rgba({c},{o*.55:.2f}) 55%,rgba({c},0) 72%);filter:blur({r.uniform(0,3):.1f}px)"></i>')
+    return '<div class="lay">' + "".join(out) + "</div>"
 
-def social_line(cls="social"):
-    return f'<div class="{cls}">{ic("fb","si")}{ic("ig","si")}<b>{HANDLE}</b><span class="dot">|</span><b>{WEB}</b></div>'
+def social(color, accent, font="600 30px Oswald", spacing=3):
+    return (f'<div class="social" style="font:{font};color:{color};letter-spacing:{spacing}px">'
+            f'<span class="si" style="color:{accent}">{ICON["fb"]}</span><span class="si" style="color:{accent}">{ICON["ig"]}</span>'
+            f'<b>{HANDLE}</b><span style="color:{accent};margin:0 14px">|</span><b>{WEB}</b></div>')
 
-BASE = """*{margin:0;padding:0;box-sizing:border-box}body{width:%dpx;height:%dpx;overflow:hidden}
-.c{position:relative;width:100%%;height:100%%;overflow:hidden}.ph{position:absolute;object-fit:cover}
-.bokeh{position:absolute;inset:0;pointer-events:none}.ic svg,.si svg{width:100%%;height:100%%;display:block}
-.ic{display:inline-block;width:46px;height:46px;flex:none}.si{display:inline-block;width:34px;height:34px;flex:none}"""
+BASE = """*{margin:0;padding:0;box-sizing:border-box}body{width:%dpx;height:%dpx;overflow:hidden;background:#000}
+.c{position:relative;width:100%%;height:100%%;overflow:hidden}.lay{position:absolute;inset:0;pointer-events:none}
+.grain{position:absolute;inset:0;background-image:%s;opacity:.16;mix-blend-mode:overlay;pointer-events:none;z-index:50}
+.ic svg,.si svg{width:100%%;height:100%%;display:block}.ic{display:inline-block;width:46px;height:46px;flex:none}
+.si{display:inline-block;width:32px;height:32px;flex:none}.social{display:flex;gap:12px;align-items:center;justify-content:center}
+.cut{position:absolute;display:block}.bgp{position:absolute;inset:-40px;width:calc(100%% + 80px);height:calc(100%% + 80px);object-fit:cover}
+.gold{background:linear-gradient(180deg,#fff3c4 0%%,#f2c766 28%%,#b8862d 52%%,#f7dc8c 70%%,#9a6a1f 100%%);-webkit-background-clip:text;background-clip:text;color:transparent}
+"""
 
-# ---------------- SOLO (feed) ----------------
-def solo_amber(s, g):
-    dt = d(g)
+def cut_img(s, h, x, bottom, extra=""):
+    c = s.get("cut", {})
+    h, x, bottom = c.get("h", h), c.get("x", x), c.get("bottom", bottom)
+    return f'<img class="cut" src="{s["_cut"]}" style="height:{h}px;left:{x}px;bottom:{bottom}px;transform:translateX(-50%);{extra}">'
+
+def dateparts(g):
+    dt = d(g); return dt, dt.strftime("%a").upper(), dt.strftime("%b").upper(), dt.day
+
+# ======================= SOLO =======================
+def solo_spotlight(s, g):
+    dt, dow, mon, day = dateparts(g)
     return f"""<style>
-.ph{{left:0;top:0;width:100%;height:60%;object-position:{s.get('focus','50% 25%')};filter:saturate(1.15) contrast(1.05) sepia(.25)}}
-.shade{{position:absolute;inset:0;background:linear-gradient(180deg,rgba(30,14,4,.0) 30%,rgba(40,18,6,.8) 50%,#22100a 60%,#22100a 100%)}}
-.grain{{position:absolute;left:0;right:0;bottom:0;height:46%;opacity:.25;background:repeating-linear-gradient(90deg,rgba(255,200,140,.08) 0 3px,rgba(0,0,0,.08) 3px 9px,rgba(255,200,140,.04) 9px 15px)}}
-.t{{position:absolute;left:0;right:0;bottom:70px;text-align:center;color:#f4ead8}}
-.name{{font:400 150px/0.9 Bebas;letter-spacing:4px;text-shadow:0 4px 18px rgba(0,0,0,.6)}}
-.tag{{font:400 60px Kaushan;color:#f2b33d;margin:4px 0 22px;display:flex;align-items:center;justify-content:center;gap:22px}}
-.tag:before,.tag:after{{content:"";width:70px;height:3px;background:#e07b1f}}
-.date{{display:inline-block;border:4px solid #e07b1f;padding:6px 34px 0;font:400 108px/1 Bebas;letter-spacing:2px}}
-.date em{{font-style:normal;color:#fff}}
-.live{{font:600 40px Oswald;color:#f08a24;letter-spacing:4px;margin-top:20px}}
-.venue{{font:400 96px/1 Bebas;letter-spacing:2px;margin-top:4px}}
-.city{{font:600 36px Oswald;color:#f08a24;letter-spacing:3px}}
-.time{{font:600 74px Oswald;color:#f6c343;display:flex;align-items:center;justify-content:center;gap:18px;margin-top:14px}}
-.time .ic{{width:66px;height:66px}}
-.social{{font:600 34px Oswald;color:#f4ead8;display:flex;gap:12px;align-items:center;justify-content:center;margin-top:24px;letter-spacing:1px}}
-.social .si{{color:#f08a24}}.dot{{color:#f08a24;margin:0 6px}}
-</style><div class="c" style="background:#22100a"><img class="ph" src="{s['_photo']}">
-{bokeh(22,3,area=(55,100,0,40))}<div class="shade"></div><div class="grain"></div>{bokeh(14,9,area=(70,100,55,95),size=(40,90))}
-<div class="t"><div class="name">DAN PYNE</div><div class="tag">{TAG}</div>
-<div class="date">{dt.strftime('%b').upper()} <em>{dt.day}</em></div>
-<div class="live">— LIVE AT —</div><div class="venue">{e(g['venue']).upper()}</div><div class="city">{e(g['city']).upper()}</div>
-<div class="time">{ic('clock')}{e(g['time'])}</div>{social_line()}</div></div>"""
+.c{{background:radial-gradient(ellipse at 50% 38%,#4a2208 0%,#1d0c03 55%,#080302 100%)}}
+.bgp{{filter:blur(18px) brightness(.35) sepia(.6) saturate(1.4);opacity:.55}}
+.cone{{position:absolute;left:50%;top:-80px;width:1300px;height:1150px;transform:translateX(-50%);
+  background:linear-gradient(180deg,rgba(255,214,150,.42),rgba(255,180,90,.10) 70%,rgba(255,170,80,0));clip-path:polygon(44% 0,56% 0,100% 100%,0 100%);filter:blur(6px)}}
+.nm{{position:absolute;left:0;right:0;top:44px;text-align:center;line-height:.8;white-space:nowrap}}
+.n1{{display:inline-block;font:400 230px Anton;letter-spacing:6px;color:transparent;-webkit-text-stroke:4px rgba(255,205,120,.9)}}
+.n2{{display:inline-block;font:400 230px Anton;letter-spacing:6px;margin-left:30px;filter:drop-shadow(0 10px 30px rgba(0,0,0,.6))}}
+.cut{{filter:drop-shadow(0 0 40px rgba(255,170,70,.55)) drop-shadow(0 20px 40px rgba(0,0,0,.6)) sepia(.35) saturate(1.2) contrast(1.08)}}
+.floor{{position:absolute;left:0;right:0;bottom:0;height:520px;background:linear-gradient(180deg,rgba(8,3,2,0),rgba(8,3,2,.92) 38%,#080302 60%)}}
+.info{{position:absolute;left:60px;right:60px;bottom:120px;text-align:center;color:#fbefd9}}
+.tag{{font:400 58px Kaushan;color:#ffc560;text-shadow:0 0 24px rgba(255,170,60,.6)}}
+.v{{font:400 104px/1 Anton;letter-spacing:3px;margin-top:6px}}
+.row{{display:flex;justify-content:center;gap:18px;margin-top:22px}}
+.chip{{display:flex;align-items:center;gap:14px;padding:14px 26px;border-radius:60px;background:rgba(255,190,100,.12);border:2px solid rgba(255,190,100,.55);font:600 40px Oswald;letter-spacing:1px}}
+.chip .ic{{width:40px;height:40px;color:#ffc560}}.chip b{{color:#ffc560;font-weight:700}}
+.ft{{position:absolute;left:0;right:0;bottom:44px}}
+</style><div class="c"><img class="bgp" src="{s['_photo']}"><div class="cone"></div>
+<div class="nm"><div class="n1">DAN</div><div class="n2 gold">PYNE</div></div>
+{bokeh(20,4,("255,190,90","255,150,50","255,220,150"),(0,100,30,70))}
+{cut_img(s, 760, 540, 330)}<div class="floor"></div>{bokeh(14,9,("255,190,90","255,160,60"),(0,100,78,98),(40,110))}
+<div class="info"><div class="tag">live · {TAG.lower()}</div><div class="v">{e(g['venue']).upper()}</div>
+<div class="row"><div class="chip">{ic('cal')}<b>{dow}</b> {mon} {day}</div><div class="chip">{ic('clock')}{e(g['time'])}</div><div class="chip">{ic('pin')}{e(g['city'].split(',')[0]).upper()}</div></div></div>
+<div class="ft">{social('#fbefd9','#ffc560')}</div><div class="grain"></div></div>"""
 
-def solo_navy(s, g):
-    dt = d(g)
+def solo_goldframe(s, g):
+    dt, dow, mon, day = dateparts(g)
     return f"""<style>
-.c{{background:#0e1726}}
-.ph{{right:0;top:0;width:56%;height:100%;object-position:{s.get('focus','50% 30%')};filter:contrast(1.05)}}
-.fade{{position:absolute;left:44%;top:0;width:340px;height:100%;background:linear-gradient(90deg,#0e1726,rgba(14,23,38,0))}}
-.frame{{position:absolute;inset:28px;border:2px solid rgba(201,163,92,.6)}}
-.L{{position:absolute;left:70px;top:90px;width:470px;color:#e9dcc0}}
-.n1{{font:500 150px/0.85 Playfair;color:#efe3c6;letter-spacing:2px}}
-.n2{{font:400 118px/0.9 Vibes;color:#c9a35c;margin:-6px 0 0 40px}}
-.live{{font:600 40px Mont;letter-spacing:12px;margin-top:40px;color:#efe3c6}}
-.sub{{font:500 22px Mont;letter-spacing:6px;color:#c9a35c;margin-top:8px}}
-.box{{border:2px solid #c9a35c;margin-top:50px;padding:34px 20px;text-align:center}}
-.box .v{{font:500 64px/1.05 Playfair;color:#efe3c6}}.box .cty{{font:600 22px Mont;letter-spacing:5px;color:#c9a35c;margin-top:14px}}
-.row{{display:flex;align-items:center;gap:22px;margin-top:40px;color:#c9a35c}}
-.row .ic{{width:76px;height:76px;padding:16px;border:2px solid #c9a35c;border-radius:50%}}
-.row .a{{font:600 30px Mont;letter-spacing:5px;color:#c9a35c}}.row .b{{font:500 52px/1 Playfair;color:#efe3c6;white-space:nowrap}}
-.foot{{position:absolute;left:0;right:0;bottom:0;height:110px;background:#efe6d4;display:flex;align-items:center;justify-content:center}}
-.social{{font:600 30px Mont;color:#0e1726;display:flex;gap:12px;align-items:center;letter-spacing:2px}}.social .si{{color:#0e1726}}.dot{{color:#c9a35c;margin:0 10px}}
-.tagl{{position:absolute;left:0;right:0;bottom:122px;text-align:center;font:600 22px Mont;letter-spacing:8px;color:#c9a35c}}
-</style><div class="c"><img class="ph" src="{s['_photo']}"><div class="fade"></div><div class="frame"></div>
-<div class="L"><div class="n1">DAN</div><div class="n2">Pyne</div><div class="live">LIVE</div><div class="sub">ACOUSTIC TOP 40 HITS</div>
-<div class="box"><div class="v">{e(g['venue'])}</div><div class="cty">{e(g['city']).upper()}</div></div>
-<div class="row">{ic('cal')}<div><div class="a">{dt.strftime('%A').upper()}</div><div class="b">{dt.strftime('%B').upper()} {dt.day}</div></div></div>
-<div class="row">{ic('clock')}<div class="b">{e(g['time'])}</div></div></div>
-<div class="tagl">GREAT MUSIC · GOOD VIBES</div><div class="foot">{social_line()}</div></div>"""
+.c{{background:radial-gradient(ellipse at 70% 40%,#22365c 0%,#0d1830 50%,#060b16 100%)}}
+.lines{{position:absolute;inset:0;background:repeating-linear-gradient(135deg,rgba(201,163,92,.05) 0 2px,transparent 2px 26px)}}
+.frame{{position:absolute;left:430px;top:250px;width:600px;height:700px;border:7px solid transparent;
+  border-image:linear-gradient(160deg,#fff0bf,#c9a35c 30%,#8a6526 55%,#f3d58a 80%,#a87d34) 1;
+  background:radial-gradient(ellipse at 50% 60%,#2a4170 0%,#101c36 80%);box-shadow:0 30px 80px rgba(0,0,0,.6)}}
+.cut{{filter:drop-shadow(0 18px 40px rgba(0,0,0,.7)) contrast(1.04)}}
+.L{{position:absolute;left:66px;top:84px;color:#efe3c6;z-index:5}}
+.n1{{font:600 190px/0.82 Playfair;letter-spacing:2px}}.n2{{font:400 170px/0.8 Vibes;margin:-10px 0 0 70px;color:#f0d792;text-shadow:0 4px 20px rgba(0,0,0,.5)}}
+.lv{{font:600 34px Mont;letter-spacing:14px;color:#efe3c6;margin-top:40px}}.sb{{font:600 22px Mont;letter-spacing:6px;color:#c9a35c;margin-top:10px;line-height:1.6}}
+.bot{{position:absolute;left:0;right:0;top:985px;text-align:center;color:#efe3c6}}
+.at{{font:600 24px Mont;letter-spacing:12px;color:#c9a35c}}.v{{font:600 92px/1.02 Playfair;margin-top:6px}}
+.det{{display:flex;justify-content:center;gap:40px;margin-top:20px;font:600 36px Mont;letter-spacing:2px}}
+.det span{{display:flex;align-items:center;gap:14px}}.det .ic{{width:42px;height:42px;color:#c9a35c}}
+.ft{{position:absolute;left:0;right:0;bottom:0;height:96px;background:linear-gradient(90deg,#c9a35c,#f3dc9a,#c9a35c);display:flex;align-items:center;justify-content:center}}
+</style><div class="c"><div class="lines"></div><div class="frame"></div>
+{bokeh(16,21,("240,200,120","255,225,160"),(40,95,20,70),(20,70),(.12,.35))}
+{cut_img(s, 860, 760, 400)}
+<div class="L"><div class="n1 gold">DAN</div><div class="n2">Pyne</div><div class="lv">LIVE</div><div class="sb">ACOUSTIC<br>TOP 40 HITS</div></div>
+<div class="bot"><div class="at">LIVE AT</div><div class="v gold">{e(g['venue'])}</div>
+<div class="det"><span>{ic('cal')}{dow}, {mon} {day}</span><span>{ic('clock')}{e(g['time'])}</span><span>{ic('pin')}{e(g['city']).upper()}</span></div></div>
+<div class="ft">{social('#0d1830','#0d1830','700 28px Mont',4)}</div><div class="grain"></div></div>"""
 
-def solo_bold(s, g):
-    dt = d(g)
+def solo_neon(s, g):
+    dt, dow, mon, day = dateparts(g)
     addr = g.get("address") or g["city"]
     return f"""<style>
-.c{{background:#1a1530}}
-.ph{{left:0;top:0;width:100%;height:100%;object-position:{s.get('focus','30% 40%')};filter:sepia(.5) saturate(1.6) hue-rotate(-12deg) contrast(1.1) brightness(.9)}}
-.tint{{position:absolute;inset:0;background:linear-gradient(160deg,rgba(80,60,160,.55) 0%,rgba(40,30,80,.2) 35%,rgba(20,14,40,.2) 55%,rgba(16,10,30,.92) 78%)}}
-.top{{position:absolute;top:60px;right:60px;text-align:right}}
-.nm{{font:400 210px/0.86 Anton;letter-spacing:2px;text-shadow:0 6px 0 rgba(0,0,0,.35)}}.nm span{{color:#f7c815}}.nm b{{font-weight:400;color:#fff}}
-.tg{{font:400 64px Anton;color:#f7c815;transform:skewX(-8deg);margin-top:16px;letter-spacing:1px}}
-.bot{{position:absolute;left:60px;right:60px;bottom:60px;color:#fff}}
-.plate{{background:linear-gradient(#8a4b22,#5e2f12);border:4px solid #b66d36;border-radius:10px;padding:20px 30px;text-align:center;font:400 82px/1 Anton;letter-spacing:2px;box-shadow:0 10px 30px rgba(0,0,0,.5)}}
-.bar{{margin-top:22px;background:linear-gradient(90deg,rgba(90,48,18,.0),rgba(90,48,18,.95) 12%,rgba(90,48,18,.95) 88%,rgba(90,48,18,0));text-align:center;font:400 70px Anton;color:#f7c815;padding:10px 0;letter-spacing:1px}}
-.rows{{margin-top:18px}}.r{{display:flex;align-items:center;gap:24px;font:400 54px Anton;padding:10px 40px;border-bottom:2px solid rgba(247,200,21,.35)}}
-.r .ic{{width:58px;height:58px;color:#f7c815}}
-.web{{text-align:center;font:400 54px Anton;margin-top:18px;letter-spacing:2px}}.web small{{font:400 40px Anton;color:#f7c815;margin-left:22px}}
-</style><div class="c"><img class="ph" src="{s['_photo']}"><div class="tint"></div>{bokeh(30,11,area=(0,100,30,75),size=(30,100))}
-<div class="top"><div class="nm"><b>DAN</b> <span>PYNE</span></div><div class="tg">ACOUSTIC TOP 40 HITS!</div></div>
-<div class="bot"><div class="plate">{e(g['venue']).upper()}</div><div class="bar">{dt.strftime('%A, %B').upper()} {dt.day}</div>
-<div class="rows"><div class="r">{ic('clock')}{e(g['time'])}</div><div class="r">{ic('pin')}{e(addr).upper()}</div></div>
-<div class="web">{WEB}<small>{HANDLE}</small></div></div></div>"""
+.c{{background:linear-gradient(150deg,#2a0b4a 0%,#5a0f6e 45%,#b0186a 100%)}}
+.dots{{position:absolute;inset:0;background-image:radial-gradient(rgba(255,255,255,.12) 2px,transparent 2.5px);background-size:22px 22px;
+  -webkit-mask-image:linear-gradient(200deg,#000,transparent 60%)}}
+.slab{{position:absolute;left:-100px;top:150px;width:1400px;height:300px;background:#ffd400;transform:rotate(-8deg);box-shadow:0 20px 0 #111}}
+.nm{{position:absolute;left:0;right:0;top:178px;text-align:center;font:400 250px/1 Anton;color:#111;letter-spacing:4px;transform:rotate(-8deg)}}
+.nm span{{color:#fff;text-shadow:8px 8px 0 #111}}
+.cut{{filter:grayscale(1) contrast(1.25) drop-shadow(0 0 0 #fff) drop-shadow(12px 0 0 #00e5ff) drop-shadow(-12px 0 0 #ff2bd6) drop-shadow(0 30px 40px rgba(0,0,0,.6))}}
+.neon{{position:absolute;right:50px;top:560px;font:400 150px Kaushan;color:#fff;transform:rotate(-10deg);
+  text-shadow:0 0 6px #fff,0 0 18px #ff4fd8,0 0 40px #ff2bd6,0 0 80px #ff2bd6}}
+.btm{{position:absolute;left:0;right:0;bottom:0;height:420px;background:linear-gradient(180deg,rgba(17,5,30,0),rgba(17,5,30,.95) 35%)}}
+.ban{{position:absolute;left:-20px;right:-20px;bottom:250px;background:#ffd400;transform:rotate(-3deg);text-align:center;padding:14px 0 8px;
+  font:400 100px/1 Anton;color:#111;letter-spacing:2px;box-shadow:0 12px 0 #111}}
+.when{{position:absolute;left:0;right:0;bottom:150px;text-align:center;font:400 62px Anton;color:#fff;letter-spacing:2px}}
+.when b{{color:#00e5ff;font-weight:400}}
+.ad{{position:absolute;left:0;right:0;bottom:96px;display:flex;justify-content:center;align-items:center;gap:12px;font:600 30px Oswald;color:#ffc6f2;letter-spacing:2px}}
+.ad .ic{{width:34px;height:34px;color:#ffd400}}.ft{{position:absolute;left:0;right:0;bottom:34px}}
+</style><div class="c"><div class="dots"></div><div class="slab"></div><div class="nm"><span>DAN</span> PYNE</div>
+{cut_img(s, 640, 470, 360)}<div class="neon">Live!</div><div class="btm"></div>
+<div class="ban">{e(g['venue']).upper()}</div><div class="when">{dt.strftime('%A').upper()}, {mon} {day} <b>·</b> {e(g['time'])}</div>
+<div class="ad">{ic('pin')}{e(addr).upper()}</div><div class="ft">{social('#fff','#ffd400')}</div><div class="grain"></div></div>"""
 
-def solo_cream(s, g):
-    dt = d(g)
+def solo_editorial(s, g):
+    dt, dow, mon, day = dateparts(g)
     return f"""<style>
-.c{{background:#ece4d6}}
-.ph{{right:0;top:0;width:62%;height:62%;object-position:{s.get('focus','50% 25%')};}}
-.pfade{{position:absolute;right:0;top:0;width:62%;height:62%;background:linear-gradient(90deg,#ece4d6 0%,rgba(236,228,214,0) 30%)}}
-.L{{position:absolute;left:70px;top:80px;width:480px}}
-.n1{{font:400 250px/0.8 Bebas;color:#1d2a3d;letter-spacing:4px}}.n2{{font:400 118px/0.9 Bebas;color:#8b6f4e;letter-spacing:10px;margin-top:10px}}
-.ln{{display:flex;align-items:center;gap:16px;color:#1d2a3d;margin:22px 0}}.ln i{{flex:1;height:2px;background:#1d2a3d}}.ln b{{font-size:30px}}
-.sub{{font:600 30px Mont;color:#1d2a3d;letter-spacing:6px}}
-.band{{position:absolute;left:0;right:0;top:62%;height:calc(38% - 110px);background:#1c2a3e;display:flex;align-items:center;color:#efe6d4}}
-.v{{width:46%;text-align:center;padding:0 30px}}.v .vn{{font:500 70px/1.05 Playfair}}.v .vc{{font:600 22px Mont;letter-spacing:6px;color:#c9a35c;margin-top:14px}}
-.sep{{width:2px;height:62%;background:#c9a35c}}
-.det{{flex:1;padding-left:50px}}.det .r{{display:flex;align-items:center;gap:22px;font:700 44px Mont;margin:14px 0;letter-spacing:1px}}
-.det .ic{{width:58px;height:58px;color:#c9a35c;padding:10px;border:2px solid #c9a35c;border-radius:50%}}
-.foot{{position:absolute;left:0;right:0;bottom:0;height:110px;background:#ece4d6;display:flex;align-items:center;justify-content:center}}
-.social{{font:600 30px Mont;color:#1d2a3d;display:flex;gap:12px;align-items:center;letter-spacing:4px}}.dot{{color:#8b6f4e;margin:0 10px}}
-</style><div class="c"><img class="ph" src="{s['_photo']}"><div class="pfade"></div>
-<div class="L"><div class="n1">DAN</div><div class="n2">PYNE</div><div class="ln"><i></i><b>★</b><i></i></div><div class="sub">LIVE ACOUSTIC<br>TOP 40 HITS</div></div>
-<div class="band"><div class="v"><div class="vn">{e(g['venue'])}</div><div class="vc">{e(g['city']).upper()}</div></div><div class="sep"></div>
-<div class="det"><div class="r">{ic('cal')}{dt.strftime('%a, %b').upper()} {dt.day}</div><div class="r">{ic('clock')}{e(g['time'])}</div></div></div>
-<div class="foot">{social_line()}</div></div>"""
+.c{{background:radial-gradient(ellipse at 60% 40%,#f6efe2,#e6dcc9)}}
+.top{{position:absolute;left:60px;right:60px;top:44px;display:flex;justify-content:space-between;font:700 22px Mont;letter-spacing:6px;color:#1c2a3e}}
+.top b{{color:#c0602a}}
+.mast{{position:absolute;left:0;right:0;top:70px;text-align:center;font:600 420px/0.85 Playfair;color:#1c2a3e;letter-spacing:-6px}}
+.cut{{filter:drop-shadow(0 20px 40px rgba(40,30,20,.35)) saturate(1.05)}}
+.L{{position:absolute;left:40px;top:600px;width:470px;padding:30px 30px 26px;background:rgba(246,239,226,.9);border-left:8px solid #c0602a;color:#1c2a3e;z-index:5}}
+.k{{font:800 26px Mont;letter-spacing:8px;color:#c0602a}}.v{{font:700 96px/0.98 Playfair;margin-top:10px}}
+.ln{{width:120px;height:6px;background:#c0602a;margin:26px 0}}
+.r{{font:800 40px Mont;letter-spacing:2px;margin:8px 0;display:flex;align-items:center;gap:14px}}.r .ic{{width:40px;height:40px;color:#c0602a}}
+.cty{{font:600 26px Mont;letter-spacing:5px;color:#6b5a44;margin-top:12px}}
+.qt{{position:absolute;right:60px;top:560px;width:250px;text-align:right;font:italic 500 44px/1.15 Playfair;color:#1c2a3e;z-index:5}}
+.qt b{{display:block;font:800 18px Mont;letter-spacing:5px;color:#c0602a;font-style:normal;margin-top:10px}}
+.ft{{position:absolute;left:0;right:0;bottom:0;height:100px;background:#1c2a3e;display:flex;align-items:center;justify-content:center}}
+</style><div class="c"><div class="top"><span>ISSUE <b>{dt.strftime('%m.%d')}</b></span><span>LIVE ACOUSTIC TOP 40</span></div>
+<div class="mast">PYNE</div>{cut_img(s, 960, 800, 100)}
+<div class="L"><div class="k">LIVE AT</div><div class="v">{e(g['venue'])}</div><div class="cty">{e(g['city']).upper()}</div><div class="ln"></div>
+<div class="r">{ic('cal')}{dow}, {mon} {day}</div><div class="r">{ic('clock')}{e(g['time'])}</div></div>
+<div class="ft">{social('#f6efe2','#e0884a','700 28px Mont',4)}</div><div class="grain" style="opacity:.22;mix-blend-mode:multiply"></div></div>"""
 
-# ---------------- STORY (day-of) ----------------
+# ======================= STORY =======================
 def story(s, g, theme):
-    pal = {"amber": ("#22100a","#f2b33d","#f08a24","#f4ead8","sepia(.25) saturate(1.15)"),
-           "navy":  ("#0e1726","#c9a35c","#c9a35c","#efe3c6","contrast(1.05)")}[theme]
-    bg, acc, acc2, tx, flt = pal
+    dt, dow, mon, day = dateparts(g)
     addr = g.get("address") or g["city"]
+    if theme == "spotlight":
+        bg = "radial-gradient(ellipse at 50% 35%,#4a2208 0%,#1d0c03 55%,#080302 100%)"; acc = "#ffc560"; tx = "#fbefd9"
+        cf = "sepia(.35) saturate(1.2) contrast(1.08) drop-shadow(0 0 50px rgba(255,170,70,.55))"; big = 'class="tn gold"'
+    else:
+        bg = "radial-gradient(ellipse at 50% 35%,#22365c 0%,#0d1830 55%,#060b16 100%)"; acc = "#f0d792"; tx = "#efe3c6"
+        cf = "contrast(1.05) drop-shadow(0 0 50px rgba(120,170,255,.35))"; big = 'class="tn gold"'
     return f"""<style>
-.ph{{inset:0;width:100%;height:100%;object-position:{s.get('focus','50% 30%')};filter:{flt}}}
-.sh{{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.55) 0%,rgba(0,0,0,0) 22%,rgba(0,0,0,0) 42%,{bg}ee 62%,{bg} 100%)}}
-.top{{position:absolute;top:130px;left:0;right:0;text-align:center;color:{tx}}}
-.tn{{font:400 230px/0.85 Anton;letter-spacing:6px;text-shadow:0 6px 24px rgba(0,0,0,.6)}}
-.tg{{font:400 64px Kaushan;color:{acc}}}
-.b{{position:absolute;left:70px;right:70px;bottom:300px;text-align:center;color:{tx}}}
-.nm{{font:400 120px/0.9 Bebas;letter-spacing:6px}}.at{{font:600 38px Oswald;letter-spacing:8px;color:{acc2};margin:18px 0 6px}}
-.v{{font:400 110px/0.95 Bebas;letter-spacing:2px}}.r{{display:flex;justify-content:center;align-items:center;gap:20px;font:600 58px Oswald;color:{acc};margin-top:22px}}
-.r .ic{{width:60px;height:60px}}.ad{{font:500 34px Oswald;letter-spacing:2px;margin-top:10px;display:flex;justify-content:center;gap:12px;align-items:center}}.ad .ic{{width:40px;height:40px;color:{acc2}}}
-.h{{font:600 34px Oswald;letter-spacing:3px;margin-top:40px;color:{tx};opacity:.9}}
-</style><div class="c" style="background:{bg}"><img class="ph" src="{s['_photo']}"><div class="sh"></div>
-{bokeh(16,5,area=(0,100,50,90),size=(30,90)) if theme=='amber' else ''}
-<div class="top"><div class="tn">TONIGHT</div><div class="tg">live acoustic music</div></div>
-<div class="b"><div class="nm">DAN PYNE</div><div class="at">LIVE AT</div><div class="v">{e(g['venue']).upper()}</div>
-<div class="r">{ic('clock')}{e(g['time'])}</div><div class="ad">{ic('pin')}{e(addr)}</div><div class="h">{HANDLE} · {WEB}</div></div></div>"""
+.c{{background:{bg}}}.bgp{{filter:blur(22px) brightness(.3);opacity:.5}}
+.tn{{position:absolute;left:0;right:0;top:140px;text-align:center;font:400 300px/0.85 Anton;letter-spacing:4px}}
+.sub{{position:absolute;left:0;right:0;top:80px;text-align:center;font:600 34px Oswald;letter-spacing:14px;color:{tx}}}
+.cut{{filter:{cf}}}
+.floor{{position:absolute;left:0;right:0;bottom:0;height:900px;background:linear-gradient(180deg,rgba(0,0,0,0),rgba(5,5,10,.85) 40%,rgba(5,5,10,.97) 60%)}}
+.card{{position:absolute;left:70px;right:70px;bottom:250px;text-align:center;color:{tx}}}
+.nm{{font:400 110px/0.9 Bebas;letter-spacing:8px}}.at{{font:600 34px Oswald;letter-spacing:10px;color:{acc};margin:20px 0 4px}}
+.v{{font:400 120px/0.95 Anton;letter-spacing:2px}}
+.t{{display:inline-flex;align-items:center;gap:18px;margin-top:30px;padding:16px 40px;border-radius:80px;border:3px solid {acc};font:600 60px Oswald;color:{acc}}}
+.t .ic{{width:58px;height:58px}}.ad{{display:flex;justify-content:center;align-items:center;gap:12px;font:500 36px Oswald;margin-top:24px}}
+.ad .ic{{width:40px;height:40px;color:{acc}}}.h{{font:600 32px Oswald;letter-spacing:4px;margin-top:30px;opacity:.85}}
+</style><div class="c"><img class="bgp" src="{s['_photo']}"><div class="sub">{dow} · {mon} {day}</div><div {big}>TONIGHT</div>
+{bokeh(18,5,("255,190,90","255,220,150") if theme=='spotlight' else ("240,200,120","170,200,255"),(0,100,25,60))}
+{cut_img(s, 900, 540, 640)}<div class="floor"></div>
+<div class="card"><div class="nm">DAN PYNE</div><div class="at">LIVE AT</div><div class="v">{e(g['venue']).upper()}</div>
+<div class="t">{ic('clock')}{e(g['time'])}</div><div class="ad">{ic('pin')}{e(addr)}</div><div class="h">{HANDLE} · {WEB}</div></div><div class="grain"></div></div>"""
 
-# ---------------- WEEKLY (short, bold) ----------------
+# ======================= WEEKLY =======================
+def rng(gigs):
+    a, b = d(gigs[0]), d(gigs[-1])
+    return f"{a.strftime('%b').upper()} {a.day} – {b.day}" if a.month == b.month else f"{a.strftime('%b').upper()} {a.day} – {b.strftime('%b').upper()} {b.day}"
+
 def weekly(s, gigs, style):
-    rows = "".join(f'<div class="r"><div class="dy"><b>{d(g).strftime("%a").upper()}</b><small>{d(g).month}.{d(g).day}</small></div>'
-                   f'<div class="vv"><div class="vn">{e(g["venue"]).upper()}</div><div class="vc">{e(g["city"]).upper()} · {e(g["time"])}</div></div></div>' for g in gigs)
-    first, last = d(gigs[0]), d(gigs[-1])
-    rng = f"{first.strftime('%b').upper()} {first.day} – {last.day}" if first.month == last.month else f"{first.strftime('%b').upper()} {first.day} – {last.strftime('%b').upper()} {last.day}"
-    if style == "anton":
+    n = len(gigs); rh = min(132, int(560 / n)); vf = min(64, int(rh * .48))
+    if style == "bigtype":
+        rows = "".join(f'<div class="r" style="height:{rh-14}px"><div class="dy"><b>{d(g).strftime("%a").upper()}</b><small>{d(g).month}/{d(g).day}</small></div>'
+                       f'<div class="vv"><div class="vn" style="font-size:{vf}px">{e(g["venue"]).upper()}</div><div class="vc">{e(g["city"].split(",")[0]).upper()} · {e(g["time"])}</div></div></div>' for g in gigs)
         return f"""<style>
-.c{{background:#0d0d0f}}.ph{{right:-60px;top:0;width:62%;height:100%;object-position:{s.get('focus','50% 30%')};filter:grayscale(1) contrast(1.15) brightness(.8)}}
-.fd{{position:absolute;inset:0;background:linear-gradient(90deg,#0d0d0f 40%,rgba(13,13,15,.6) 62%,rgba(13,13,15,.15) 100%)}}
-.H{{position:absolute;left:70px;top:80px;color:#fff}}.h1{{font:400 200px/0.82 Anton;letter-spacing:2px}}
-.h2{{font:400 120px/1 Kaushan;color:#f7c815;margin:-30px 0 0 120px;transform:rotate(-4deg)}}
-.rg{{font:600 34px Oswald;letter-spacing:8px;color:#bbb;margin-top:10px}}
-.L{{position:absolute;left:70px;right:70px;top:560px}}
-.r{{display:flex;align-items:center;gap:34px;padding:22px 0;border-bottom:2px solid rgba(247,200,21,.3)}}
-.dy{{width:150px;background:#f7c815;color:#0d0d0f;text-align:center;padding:10px 0;border-radius:6px}}.dy b{{display:block;font:400 64px/1 Anton}}.dy small{{font:700 28px Oswald}}
-.vn{{font:400 70px/1 Anton;color:#fff;letter-spacing:1px}}.vc{{font:600 32px Oswald;color:#f7c815;letter-spacing:3px;margin-top:6px}}
-.foot{{position:absolute;left:70px;right:70px;bottom:60px;display:flex;justify-content:space-between;align-items:center;color:#fff;font:400 44px Anton;letter-spacing:2px}}
-.social{{font:600 30px Oswald;color:#fff;display:flex;gap:10px;align-items:center;letter-spacing:2px}}.social .si{{color:#f7c815}}.dot{{color:#f7c815;margin:0 8px}}
-</style><div class="c"><img class="ph" src="{s['_photo']}"><div class="fd"></div>
-<div class="H"><div class="h1">THIS<br>WEEK</div><div class="h2">live!</div><div class="rg">DAN PYNE · {rng}</div></div>
-<div class="L">{rows}</div><div class="foot">{social_line()}</div></div>"""
-    # split: top photo band, bold list under
+.c{{background:radial-gradient(ellipse at 70% 30%,#2b2410 0%,#0b0b0c 60%)}}
+.cone{{position:absolute;left:62%;top:-80px;width:900px;height:1000px;transform:translateX(-50%);background:linear-gradient(180deg,rgba(255,220,80,.35),rgba(255,210,60,0));clip-path:polygon(42% 0,58% 0,100% 100%,0 100%);filter:blur(8px)}}
+.big{{position:absolute;left:40px;top:30px;font:400 300px/0.8 Anton;color:transparent;-webkit-text-stroke:4px #ffd23f;letter-spacing:2px}}
+.big b{{display:block;color:#ffd23f;-webkit-text-stroke:0;font-weight:400}}
+.cut{{filter:grayscale(1) contrast(1.2) drop-shadow(0 0 40px rgba(255,210,63,.45))}}
+.sh{{position:absolute;left:0;right:0;bottom:0;height:820px;background:linear-gradient(180deg,rgba(11,11,12,0),rgba(11,11,12,.9) 30%,#0b0b0c 50%)}}
+.lbl{{position:absolute;left:60px;top:560px;font:600 32px Oswald;letter-spacing:10px;color:#fff}}.lbl b{{color:#ffd23f}}
+.L{{position:absolute;left:60px;right:60px;top:620px}}
+.r{{display:flex;align-items:center;gap:28px;margin-bottom:14px;padding:0 24px;border-radius:16px;background:rgba(255,255,255,.06);border:1px solid rgba(255,210,63,.35)}}
+.dy{{width:120px;text-align:center}}.dy b{{display:block;font:400 58px/1 Anton;color:#ffd23f}}.dy small{{font:700 24px Oswald;color:#ccc}}
+.vn{{font-family:Anton;color:#fff;letter-spacing:1px;line-height:1.05;white-space:nowrap}}.vc{{font:600 28px Oswald;color:#ffd23f;letter-spacing:3px}}
+.ft{{position:absolute;left:0;right:0;bottom:40px}}
+</style><div class="c"><div class="cone"></div><div class="big">THIS<b>WEEK</b></div>{cut_img(s, 640, 860, 600)}<div class="sh"></div>
+<div class="lbl">DAN PYNE <b>LIVE</b> · {rng(gigs)}</div><div class="L">{rows}</div><div class="ft">{social('#fff','#ffd23f')}</div><div class="grain"></div></div>"""
+    rows = "".join(f'<div class="r" style="height:{rh-14}px"><div class="dy"><small>{d(g).strftime("%a").upper()}</small><b>{d(g).day}</b></div>'
+                   f'<div class="vv"><div class="vn" style="font-size:{min(48,vf)}px">{e(g["venue"]).upper()}</div><div class="vc">{e(g["city"].split(",")[0]).upper()} · {e(g["time"])}</div></div></div>' for g in gigs)
     return f"""<style>
-.c{{background:#f3ece0}}.ph{{left:0;top:0;width:100%;height:42%;object-position:{s.get('focus','50% 30%')};filter:sepia(.2) saturate(1.1)}}
-.ov{{position:absolute;left:0;top:0;width:100%;height:42%;background:linear-gradient(180deg,rgba(20,30,48,.1),rgba(20,30,48,.85))}}
-.H{{position:absolute;left:70px;right:70px;top:300px;color:#fff;display:flex;justify-content:space-between;align-items:flex-end}}
-.h1{{font:400 150px/0.85 Bebas;letter-spacing:4px}}.h1 span{{color:#e9a23b}}.rg{{font:700 34px Mont;letter-spacing:4px;text-align:right}}
-.L{{position:absolute;left:70px;right:70px;top:46%}}
-.r{{display:flex;align-items:center;gap:30px;padding:20px 0;border-bottom:3px solid #1c2a3e}}
-.dy{{width:140px;text-align:center;color:#1c2a3e}}.dy b{{display:block;font:400 72px/0.9 Bebas;letter-spacing:2px}}.dy small{{font:700 26px Mont;color:#e07b1f}}
-.vn{{font:400 72px/1 Bebas;color:#1c2a3e;letter-spacing:2px}}.vc{{font:600 28px Mont;color:#8b6f4e;letter-spacing:3px}}
-.foot{{position:absolute;left:0;right:0;bottom:0;height:110px;background:#1c2a3e;display:flex;align-items:center;justify-content:center}}
-.social{{font:600 30px Mont;color:#efe6d4;display:flex;gap:12px;align-items:center;letter-spacing:3px}}.social .si{{color:#e9a23b}}.dot{{color:#e9a23b;margin:0 10px}}
-</style><div class="c"><img class="ph" src="{s['_photo']}"><div class="ov"></div>
-<div class="H"><div class="h1">DAN PYNE<br><span>THIS WEEK</span></div><div class="rg">{rng}</div></div>
-<div class="L">{rows}</div><div class="foot">{social_line()}</div></div>"""
+.c{{background:linear-gradient(170deg,#ff9a3c 0%,#ef5a3c 40%,#7a1f5c 75%,#2a0f3a 100%)}}
+.sun{{position:absolute;left:700px;top:220px;width:560px;height:560px;border-radius:50%;transform:translateX(-50%);
+  background:repeating-linear-gradient(180deg,#ffd76a 0 34px,transparent 34px 46px);-webkit-mask-image:linear-gradient(180deg,#000 55%,transparent 100%);opacity:.9}}
+.h{{position:absolute;left:60px;top:60px;color:#fff}}.h1{{font:400 170px/0.84 Anton;letter-spacing:2px;text-shadow:8px 8px 0 #2a0f3a}}
+.h2{{font:400 80px Kaushan;color:#ffe9a8;margin:-10px 0 0 20px;transform:rotate(-4deg)}}.rg{{font:700 30px Mont;letter-spacing:6px;margin-top:10px}}
+.cut{{filter:drop-shadow(0 25px 40px rgba(42,15,58,.7)) saturate(1.05)}}
+.L{{position:absolute;left:60px;width:600px;top:560px}}
+.r{{display:flex;align-items:center;gap:22px;margin-bottom:14px;padding:0 22px;background:#fff6e6;border-radius:14px;box-shadow:8px 8px 0 #2a0f3a}}
+.dy{{width:96px;height:calc(100% - 20px);background:#2a0f3a;color:#ffd76a;border-radius:10px;display:flex;flex-direction:column;justify-content:center;text-align:center}}
+.dy small{{font:800 20px Mont;letter-spacing:3px}}.dy b{{font:400 54px/1 Anton}}
+.vn{{font-family:Anton;color:#2a0f3a;line-height:1.05;white-space:nowrap;letter-spacing:1px}}.vc{{font:700 22px Mont;color:#c0442e;letter-spacing:2px}}
+.ft{{position:absolute;left:0;right:0;bottom:0;height:96px;background:#2a0f3a;display:flex;align-items:center;justify-content:center}}
+</style><div class="c"><div class="sun"></div><div class="h"><div class="h1">DAN PYNE</div><div class="h2">this week!</div><div class="rg">{rng(gigs)}</div></div>
+{cut_img(s, 900, 860, 96)}<div class="L">{rows}</div><div class="ft">{social('#fff6e6','#ffd76a','700 28px Mont',4)}</div><div class="grain"></div></div>"""
 
-# ---------------- MONTHLY ----------------
+# ======================= MONTHLY =======================
 def monthly(s, gigs, style):
     month = s.get("month") or d(gigs[0]).strftime("%B")
-    n = len(gigs)
-    rowh = min(96, int(740 / max(n, 1)))
-    fs = min(52, int(rowh * .55))
-    if style == "darklist":
-        msz = 190 if len(month) <= 6 else 150
-        fs2 = min(fs, 44)
-        rows = "".join(f'<div class="r" style="height:{rowh}px"><b>{d(g).month}.{d(g).day}</b><div class="vv"><div class="vn" style="font-size:{fs2}px;white-space:nowrap">{e(g["venue"]).upper()}</div>'
-                       f'<div class="tm">{e(g["city"].split(",")[0]).upper()} · {e(g["time"])}</div></div></div>' for g in gigs)
+    n = len(gigs); rh = min(100, int(700 / max(n, 1))); vf = min(46, int(rh * .5))
+    if style == "marquee":
+        bulbs = "".join(f'<i style="left:{x}px;top:18px"></i><i style="left:{x}px;bottom:18px"></i>' for x in range(30, 1060, 52)) + \
+                "".join(f'<i style="top:{y}px;left:18px"></i><i style="top:{y}px;right:18px"></i>' for y in range(70, 1300, 52))
+        rows = "".join(f'<div class="r" style="height:{rh}px"><b>{d(g).month}.{d(g).day}</b><div class="vv"><div class="vn" style="font-size:{vf}px">{e(g["venue"]).upper()}</div>'
+                       f'<div class="vc">{d(g).strftime("%a").upper()} · {e(g["city"].split(",")[0]).upper()} · {e(g["time"])}</div></div></div>' for g in gigs)
+        mfs = 210 if len(month) <= 6 else (170 if len(month) <= 8 else 150)
         return f"""<style>
-.c{{background:#111}}.ph{{right:0;top:0;width:58%;height:100%;object-position:{s.get('focus','50% 30%')};filter:contrast(1.05) saturate(.95)}}
-.p{{position:absolute;left:0;top:0;width:62%;height:100%;background:linear-gradient(90deg,#0e0e0e 80%,rgba(14,14,14,0))}}
-.H{{position:absolute;left:60px;top:60px;color:#f2f2f2}}.m{{font:400 {msz}px/0.82 Bebas;letter-spacing:4px}}.s{{font:400 100px/1 Kaushan;color:#e9c08a;margin:-34px 0 0 70px}}
-.u{{width:300px;height:5px;background:#e9c08a;margin:6px 0 0 70px;border-radius:3px}}
-.L{{position:absolute;left:60px;top:380px;width:560px}}
-.r{{display:flex;align-items:center;gap:22px;border-bottom:1px solid rgba(255,255,255,.18);color:#f2f2f2}}
-.r b{{font:400 46px Bebas;color:#e9c08a;width:100px;letter-spacing:1px}}.vn{{font-family:Bebas;letter-spacing:2px;flex:1;line-height:1}}
-.vv{{flex:1}}.tm{{font:500 22px Oswald;color:#aaa;letter-spacing:2px}}
-.tk{{position:absolute;right:50px;bottom:150px;width:400px;padding:22px 26px;background:rgba(14,14,14,.8);border:2px solid #e9c08a;transform:rotate(-3deg);
- font:400 44px/1.1 Kaushan;color:#e9c08a;text-align:center}}
-.foot{{position:absolute;left:0;right:0;bottom:0;height:96px;background:#0e0e0e;border-top:2px solid #e9c08a;display:flex;align-items:center;justify-content:center}}
-.social{{font:600 28px Oswald;color:#f2f2f2;display:flex;gap:12px;align-items:center;letter-spacing:6px}}.social .si{{color:#e9c08a}}.dot{{color:#e9c08a;margin:0 10px}}
-</style><div class="c"><img class="ph" src="{s['_photo']}"><div class="p"></div>
-<div class="H"><div class="m">{e(month).upper()}</div><div class="s">Shows</div><div class="u"></div></div>
-<div class="L">{rows}</div><div class="tk">Thank you for supporting live music!</div><div class="foot">{social_line()}</div></div>"""
-    rows = "".join(f'<div class="r" style="height:{rowh}px"><div class="dt"><small>{d(g).strftime("%b").upper()}</small><b>{d(g).day}</b></div>'
-                   f'<div><div class="vn" style="font-size:{min(32,fs)}px">{e(g["venue"]).upper()}</div><div class="vc">{e(g["city"]).upper()}</div><div class="tm">{e(g["time"])}</div></div></div>' for g in gigs)
+.c{{background:radial-gradient(ellipse at 75% 35%,#3a1414 0%,#160808 55%,#0a0505 100%)}}
+.bl i{{position:absolute;width:14px;height:14px;border-radius:50%;background:#ffe8a8;box-shadow:0 0 10px #ffcf6a,0 0 22px #ffb030}}
+.inner{{position:absolute;inset:50px;border:3px solid rgba(255,200,100,.5)}}
+.m{{position:absolute;left:84px;top:80px;font:400 {mfs}px/0.85 Anton;letter-spacing:4px}}
+.sh2{{position:absolute;left:96px;top:{80+int(mfs*.8)}px;font:400 96px Kaushan;color:#fff;text-shadow:0 0 10px #ff5a5a,0 0 30px #ff2a2a}}
+.cut{{filter:drop-shadow(0 0 40px rgba(255,120,80,.45)) drop-shadow(0 20px 40px rgba(0,0,0,.7))}}
+.fd{{position:absolute;right:50px;bottom:50px;width:600px;height:500px;background:linear-gradient(180deg,rgba(10,5,5,0),rgba(10,5,5,.9))}}
+.L{{position:absolute;left:84px;top:{380 if n<=6 else 350}px;width:520px;padding:20px 28px;background:rgba(10,5,5,.72);border:1px solid rgba(255,200,100,.35);border-radius:12px}}
+.r{{display:flex;align-items:center;gap:22px;border-bottom:1px solid rgba(255,220,160,.15)}}.r:last-child{{border:0}}
+.r b{{font:400 44px Anton;color:#ffcf6a;width:100px}}.vn{{font-family:Bebas;color:#fff;letter-spacing:2px;line-height:1;white-space:nowrap}}
+.vc{{font:500 20px Oswald;color:#d9b9a0;letter-spacing:2px}}
+.ty{{position:absolute;right:90px;bottom:170px;font:400 46px/1.1 Kaushan;color:#ffcf6a;text-align:right;transform:rotate(-4deg);text-shadow:0 2px 10px #000}}
+.ft{{position:absolute;left:0;right:0;bottom:78px}}
+</style><div class="c"><div class="inner"></div>{cut_img(s, 900, 860, 50)}<div class="fd"></div>
+<div class="m gold">{e(month).upper()}</div><div class="sh2">Shows</div><div class="L">{rows}</div>
+<div class="ty">Thank you for supporting<br>live music!</div><div class="ft">{social('#fff','#ffcf6a')}</div><div class="bl">{bulbs}</div><div class="grain"></div></div>"""
+    rows = "".join(f'<div class="r" style="height:{rh}px"><div class="dt"><small>{d(g).strftime("%a").upper()}</small><b>{d(g).day}</b></div>'
+                   f'<div class="vv"><div class="vn" style="font-size:{min(34,vf)}px">{e(g["venue"])}</div><div class="vc">{e(g["city"].split(",")[0]).upper()} · {e(g["time"])}</div></div></div>' for g in gigs)
     return f"""<style>
-.c{{background:#efe8dc}}.ph{{right:0;top:0;width:50%;height:100%;object-position:{s.get('focus','50% 30%')}}}
-.fd{{position:absolute;right:0;top:0;width:50%;height:100%;background:linear-gradient(90deg,#efe8dc 0%,rgba(239,232,220,.4) 25%,rgba(239,232,220,0) 45%)}}
-.H{{position:absolute;left:60px;top:46px;width:540px;text-align:center}}.n1{{font:500 120px/0.85 Playfair;color:#1c2a3e}}
-.n2{{font:600 44px Mont;letter-spacing:22px;color:#8b6f4e;margin-top:6px}}
-.ln{{display:flex;align-items:center;gap:16px;margin-top:22px;font:700 30px Mont;letter-spacing:6px;color:#1c2a3e}}.ln i{{flex:1;height:2px;background:#1c2a3e}}
-.L{{position:absolute;left:60px;top:440px;width:540px}}
-.r{{display:flex;align-items:center;gap:24px;border-bottom:1px solid rgba(28,42,62,.25)}}
-.dt{{width:90px;height:calc(100% - 12px);max-height:84px;background:#1c2a3e;color:#efe6d4;text-align:center;display:flex;flex-direction:column;justify-content:center}}
-.dt small{{font:700 16px Mont;letter-spacing:2px}}.dt b{{font:700 36px/1 Mont}}
-.vn{{font-family:Mont;font-weight:800;color:#1c2a3e;letter-spacing:1px;line-height:1.05;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px}}.vc{{font:600 17px Mont;color:#555;letter-spacing:2px}}.tm{{font:700 17px Mont;color:#b07a2a}}
-.foot{{position:absolute;left:0;right:0;bottom:0;height:96px;background:#efe8dc;border-top:2px solid #1c2a3e;display:flex;align-items:center;justify-content:center}}
-.social{{font:600 28px Mont;color:#1c2a3e;display:flex;gap:12px;align-items:center;letter-spacing:4px}}.dot{{color:#8b6f4e;margin:0 10px}}
-.sig{{position:absolute;right:60px;bottom:120px;font:400 90px Vibes;color:#f3e7c9;text-shadow:0 2px 12px rgba(0,0,0,.6)}}
-</style><div class="c"><img class="ph" src="{s['_photo']}"><div class="fd"></div>
-<div class="H"><div class="n1">DAN PYNE</div><div class="n2">LIVE</div><div class="ln"><i></i>IN {e(month).upper()}<i></i></div></div>
-<div class="L">{rows}</div><div class="sig">Dan Pyne</div><div class="foot">{social_line()}</div></div>"""
+.c{{background:radial-gradient(ellipse at 65% 40%,#f6efe2,#e3d8c4)}}
+.top{{position:absolute;left:60px;right:60px;top:40px;display:flex;justify-content:space-between;font:700 22px Mont;letter-spacing:6px;color:#1c2a3e}}.top b{{color:#c0602a}}
+.mast{{position:absolute;left:0;right:0;top:66px;text-align:center;font:600 {300 if len(month)<=5 else (230 if len(month)<=7 else 190)}px/0.85 Playfair;color:#1c2a3e;letter-spacing:-4px}}
+.cut{{filter:drop-shadow(0 20px 40px rgba(40,30,20,.35))}}
+.L{{position:absolute;left:60px;top:{430 if n<=6 else 400}px;width:520px;padding:16px 26px;background:rgba(246,239,226,.9);border-left:8px solid #c0602a}}
+.k{{font:800 22px Mont;letter-spacing:8px;color:#c0602a;margin-bottom:8px}}
+.r{{display:flex;align-items:center;gap:20px;border-bottom:1px solid rgba(28,42,62,.18)}}.r:last-child{{border:0}}
+.dt{{width:74px;text-align:center;color:#1c2a3e}}.dt small{{display:block;font:800 16px Mont;letter-spacing:3px;color:#c0602a}}.dt b{{font:700 44px/1 Playfair}}
+.vn{{font-family:Playfair;font-weight:700;color:#1c2a3e;line-height:1.05;white-space:nowrap}}.vc{{font:700 17px Mont;letter-spacing:3px;color:#6b5a44}}
+.ft{{position:absolute;left:0;right:0;bottom:0;height:96px;background:#1c2a3e;display:flex;align-items:center;justify-content:center}}
+</style><div class="c"><div class="top"><span>DAN PYNE <b>LIVE</b></span><span>ACOUSTIC TOP 40</span></div><div class="mast">{e(month)}</div>
+{cut_img(s, 1000, 790, 96)}<div class="L"><div class="k">ON STAGE THIS MONTH</div>{rows}</div>
+<div class="ft">{social('#f6efe2','#e0884a','700 28px Mont',4)}</div><div class="grain" style="opacity:.22;mix-blend-mode:multiply"></div></div>"""
 
+# ======================= BUILD =======================
 def build(s):
-    s["_photo"] = "file://" + str(PHOTOS / s["photo"])
-    k = s["kind"]; gigs = s["gigs"]
+    stem = pathlib.Path(s["photo"]).stem
+    s["_photo"] = "file://" + str(PHOTOS / f"{stem}.jpg")
+    cut = CUTS / f"{stem}.png"
+    if not cut.exists(): raise SystemExit(f"missing cutout {cut}; run: python3 render.py --cutout {stem}")
+    s["_cut"] = "file://" + str(cut)
+    k, gigs = s["kind"], s["gigs"]
     if k == "solo":
-        body = {"amber": solo_amber, "navy": solo_navy, "bold": solo_bold, "cream": solo_cream}[s["style"]](s, gigs[0]); W, H = 1080, 1350
-    elif k == "story":
-        body = story(s, gigs[0], s.get("style", "amber")); W, H = 1080, 1920
-    elif k == "weekly":
-        body = weekly(s, gigs, s["style"]); W, H = 1080, 1350
-    elif k == "monthly":
-        body = monthly(s, gigs, s["style"]); W, H = 1080, 1350
-    else:
-        raise SystemExit("unknown kind")
-    return f"<!doctype html><html><head><meta charset='utf-8'><style>{fontface()}{BASE % (W, H)}</style></head><body>{body}</body></html>", W, H
+        body = {"spotlight": solo_spotlight, "goldframe": solo_goldframe, "neon": solo_neon, "editorial": solo_editorial}[s["style"]](s, gigs[0]); W, H = 1080, 1350
+    elif k == "story": body = story(s, gigs[0], s.get("style", "spotlight")); W, H = 1080, 1920
+    elif k == "weekly": body = weekly(s, gigs, s["style"]); W, H = 1080, 1350
+    elif k == "monthly": body = monthly(s, gigs, s["style"]); W, H = 1080, 1350
+    else: raise SystemExit("unknown kind")
+    return f"<!doctype html><html><head><meta charset='utf-8'><style>{fontface()}{BASE % (W, H, GRAIN)}</style></head><body>{body}</body></html>", W, H
 
 def render(spec_path, out):
+    from playwright.sync_api import sync_playwright
     s = json.loads(pathlib.Path(spec_path).read_text())
     doc, W, H = build(s)
     tmp = pathlib.Path(out).with_suffix(".html"); tmp.write_text(doc)
     with sync_playwright() as p:
         b = p.chromium.launch(executable_path="/usr/bin/google-chrome", args=["--allow-file-access-from-files"])
         pg = b.new_page(viewport={"width": W, "height": H})
-        pg.goto("file://" + str(tmp.resolve())); pg.wait_for_timeout(400)
+        pg.goto("file://" + str(tmp.resolve())); pg.wait_for_timeout(500)
         pg.screenshot(path=out, type="png"); b.close()
     tmp.unlink()
 
+def make_cutout(stem):
+    """Cut Dan out of photos/<stem>.jpg -> cutouts/<stem>.png, fading the bottom. Needs: pip install rembg[cpu]"""
+    from rembg import remove, new_session
+    from PIL import Image
+    import numpy as np
+    im = Image.open(PHOTOS / f"{stem}.jpg")
+    out = remove(im, session=new_session("u2net_human_seg"), post_process_mask=True)
+    out = out.crop(out.getbbox()); w, h = out.size
+    a = np.array(out.split()[-1]).astype(float); ys = np.arange(h) / h
+    a *= np.clip((0.95 - ys) / 0.3, 0, 1)[:, None]
+    out.putalpha(Image.fromarray(a.astype("uint8"))); out.crop(out.getbbox()).save(CUTS / f"{stem}.png")
+    print("wrote", CUTS / f"{stem}.png", "- check it by eye before using")
+
 if __name__ == "__main__":
-    render(sys.argv[1], sys.argv[2])
+    if sys.argv[1] == "--cutout": make_cutout(sys.argv[2])
+    else: render(sys.argv[1], sys.argv[2])

@@ -1,13 +1,53 @@
 {
-  "note": "Last style and photo used per post type. The Sunday task reads this to rotate looks, and appends after each run.",
-  "last": {
-    "solo": {"style": "amber", "photo": "hob-stage-bw.jpg", "date": "2026-11-14"},
-    "story": {"style": "navy", "photo": "riverfront-portrait-1.jpg", "date": "2026-11-14"},
-    "weekly": null,
-    "monthly": null
-  },
-  "history": [
-    {"date": "2026-11-14", "venue": "The Wine Mill", "type": "solo", "style": "amber", "photo": "hob-stage-bw.jpg"},
-    {"date": "2026-11-14", "venue": "The Wine Mill", "type": "story", "style": "navy", "photo": "riverfront-portrait-1.jpg"}
+ "note": "Last style and photo used per post type. The Sunday task reads this to rotate looks, and appends after each run.",
+ "styles": {
+  "solo": [
+   "spotlight",
+   "goldframe",
+   "neon",
+   "editorial"
+  ],
+  "story": [
+   "spotlight",
+   "navy"
+  ],
+  "weekly": [
+   "bigtype",
+   "sunset"
+  ],
+  "monthly": [
+   "marquee",
+   "editorial"
   ]
+ },
+ "last": {
+  "solo": {
+   "style": "spotlight",
+   "photo": "hob-stage-bw",
+   "date": "2026-11-14"
+  },
+  "story": {
+   "style": "navy",
+   "photo": "riverfront-portrait-1",
+   "date": "2026-11-14"
+  },
+  "weekly": null,
+  "monthly": null
+ },
+ "history": [
+  {
+   "date": "2026-11-14",
+   "venue": "The Wine Mill",
+   "type": "solo",
+   "style": "spotlight",
+   "photo": "hob-stage-bw"
+  },
+  {
+   "date": "2026-11-14",
+   "venue": "The Wine Mill",
+   "type": "story",
+   "style": "navy",
+   "photo": "riverfront-portrait-1"
+  }
+ ]
 }
