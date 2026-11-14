@@ -17,9 +17,13 @@ Spec keys:
             "address":"4964 Akron-Cleveland Rd, Peninsula"}]
   month:  "November" (monthly only; defaults to the first gig's month)
 
-Photo notes: riverfront-portrait-1/2 are clean head-to-hip cutouts (best for goldframe, editorial,
-story, weekly, monthly). hob-stage-bw is a live shot with guitar and mic, faded at the bottom
-(best for spotlight, neon, story spotlight, weekly bigtype).
+Photo notes (prefer the live shots; they look best):
+  greenwall-singing    close-up singing with guitar, color. Great everywhere (goldframe, editorial,
+                       story, weekly bigtype, marquee).
+  farmers-singing-hat  singing with guitar, hat, color, upper body. Best for spotlight, neon,
+                       sunset, story spotlight.
+  hob-stage-bw         B&W live shot, faded at the bottom. Spotlight, neon, bigtype.
+  riverfront-portrait-1/2  older non-performance portraits (jacket). Use least often.
 """
 import json, sys, html, datetime, pathlib
 
