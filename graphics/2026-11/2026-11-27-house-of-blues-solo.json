@@ -1,0 +1,8 @@
+{
+ "kind": "solo",
+ "style": "goldframe",
+ "photo": "greenwall-singing",
+ "gigs": [
+  {"date": "2026-11-27", "venue": "House of Blues", "city": "Cleveland, OH", "time": "9 PM-12 AM", "address": "308 Euclid Ave, Cleveland"}
+ ]
+}

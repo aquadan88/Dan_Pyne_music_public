@@ -22,14 +22,14 @@
  },
  "last": {
   "solo": {
-   "style": "spotlight",
-   "photo": "hob-stage-bw",
-   "date": "2026-11-14"
+   "style": "goldframe",
+   "photo": "greenwall-singing",
+   "date": "2026-11-27"
   },
   "story": {
-   "style": "navy",
-   "photo": "riverfront-portrait-1",
-   "date": "2026-11-14"
+   "style": "spotlight",
+   "photo": "farmers-singing-hat",
+   "date": "2026-11-27"
   },
   "weekly": null,
   "monthly": null
@@ -48,6 +48,20 @@
    "type": "story",
    "style": "navy",
    "photo": "riverfront-portrait-1"
+  },
+  {
+   "date": "2026-11-27",
+   "venue": "House of Blues",
+   "type": "solo",
+   "style": "goldframe",
+   "photo": "greenwall-singing"
+  },
+  {
+   "date": "2026-11-27",
+   "venue": "House of Blues",
+   "type": "story",
+   "style": "spotlight",
+   "photo": "farmers-singing-hat"
   }
  ]
 }
